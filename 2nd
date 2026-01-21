@@ -1,0 +1,108 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from scipy.signal import find_peaks
+
+# --- 1. 설정 (Configuration) ---
+DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations"
+SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117]
+FS = 1000.0  # Sampling Freq
+TEST_CASES = list(range(1, 11))
+
+# 파일 리스트 정의 (요청하신 파일명 형식 반영)
+file_list = [("fh_accelerations.dat", "Healthy")] + \
+            [(f"f{i}_accelerations.dat", f"Damage {i*10}%") for i in TEST_CASES]
+
+# --- 2. 데이터 처리 함수들 ---
+def load_and_extract_sensors(filepath, selected_indices):
+    try:
+        full_data = np.loadtxt(filepath)
+        if full_data.shape[0] < full_data.shape[1]: 
+            full_data = full_data.T
+        return full_data[:, selected_indices].T
+    except Exception as e:
+        print(f"[Skip] {os.path.basename(filepath)} 로드 실패")
+        return None
+
+def convert_to_frequency(signal, fs):
+    n = len(signal)
+    signal = signal - np.mean(signal) # DC 제거
+    fft_val = np.fft.fft(signal)
+    freq_axis = np.fft.fftfreq(n, d=1/fs)
+    half_n = n // 2
+    return freq_axis[:half_n], 2.0/n * np.abs(fft_val[:half_n])
+
+# --- 3. 플롯 그리기 함수 (Linear / Log 통합) ---
+def plot_spectra(scale_type="linear"):
+    """
+    scale_type: 'linear' 또는 'log'
+    """
+    # 4행 3열 그리드 생성
+    fig, axes = plt.subplots(4, 3, figsize=(20, 18))
+    axes = axes.flatten()
+    
+    print(f"--- Generating {scale_type.upper()} Scale Plots ---")
+    
+    for idx, (filename, label) in enumerate(file_list):
+        filepath = os.path.join(DATA_PATH, filename)
+        ax = axes[idx]
+        
+        sensor_data = load_and_extract_sensors(filepath, SELECTED_NODE_INDICES)
+        
+        if sensor_data is not None:
+            # 8개 센서 평균 스펙트럼 계산
+            avg_magnitude = None
+            freq_axis = None
+            for s in range(8):
+                f, mag = convert_to_frequency(sensor_data[s], FS)
+                if avg_magnitude is None: avg_magnitude = mag; freq_axis = f
+                else: avg_magnitude += mag
+            avg_magnitude /= 8.0
+            
+            # --- 스케일에 따른 플롯 방식 ---
+            if scale_type == "log":
+                ax.semilogy(freq_axis, avg_magnitude, 'b-', linewidth=0.8)
+                ylabel_text = "Amplitude (Log Scale)"
+                # 로그 스케일에서는 작은 피크도 잘 보이므로 높이 임계값 낮춤
+                peak_height = np.max(avg_magnitude) * 0.0001
+            else:
+                ax.plot(freq_axis, avg_magnitude, 'b-', linewidth=0.8)
+                ylabel_text = "Amplitude (Linear Scale)"
+                # 선형 스케일에서는 큰 피크만 찾음
+                peak_height = np.max(avg_magnitude) * 0.05
+            
+            # 피크 찾기
+            peaks, _ = find_peaks(avg_magnitude, height=peak_height, distance=50)
+            
+            # [요청사항] 'x' 대신 점('.')으로 표시 (빨간색 점)
+            ax.plot(freq_axis[peaks], avg_magnitude[peaks], "r.", markersize=10)
+            
+            # 축 및 레이블 설정
+            ax.set_title(f"[{filename}] {label}", fontsize=12, fontweight='bold')
+            ax.set_xlim(0, 100)
+            ax.grid(True, which="both", linestyle='--', alpha=0.5)
+            ax.set_xlabel("Frequency (Hz)", fontsize=10)
+            ax.set_ylabel(ylabel_text, fontsize=10)
+            
+            # 피크 개수 텍스트
+            ax.text(0.95, 0.95, f"Peaks: {len(peaks)}", 
+                    transform=ax.transAxes, ha='right', va='top', 
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        else:
+            ax.text(0.5, 0.5, "Data Not Found", ha='center')
+
+    # 빈 칸 정리
+    for i in range(len(file_list), len(axes)):
+        fig.delaxes(axes[i])
+    
+    plt.tight_layout()
+    plt.suptitle(f"Frequency Response ({scale_type.capitalize()} Scale)", fontsize=16, y=1.02)
+
+# --- 4. 실행 ---
+# (1) 선형 스케일 그래프 생성
+plot_spectra(scale_type="linear")
+
+# (2) 로그 스케일 그래프 생성
+plot_spectra(scale_type="log")
+
+plt.show()
