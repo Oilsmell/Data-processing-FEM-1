@@ -1,0 +1,203 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.signal import welch, find_peaks
+import os
+
+# ==========================================
+# 1. 설정값 정의
+# ==========================================
+DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations"  # 데이터 파일 경로 (필요시 수정)
+DT = 0.001        # 시간 증분
+FS = 1 / DT       # 샘플링 주파수 (1000 Hz)
+
+# 8개 노드 선택
+TARGET_NODES = [3, 21, 39, 57, 63, 81, 99, 117]
+SENSOR_INDICES = [x - 1 for x in TARGET_NODES]
+
+# ==========================================
+# 관심 모드 예상 위치 (Hz)
+TARGET_MODES = [20, 22, 55, 60]
+
+# ==========================================
+# 2. 데이터 로드 함수
+# ==========================================
+def load_real_data(filename):
+    file_path = os.path.join(DATA_PATH, filename)
+    if not os.path.exists(file_path):
+        print(f"[Warning] 파일을 찾을 수 없습니다: {filename}")
+        return None
+    try:
+        # 헤더/텍스트 자동 처리
+        df = pd.read_csv(file_path, sep=r'\s+', header=None, low_memory=False)
+        try: float(df.iloc[0, 1])
+        except ValueError: df = df.iloc[1:].reset_index(drop=True)
+        df = df.apply(pd.to_numeric, errors='coerce')
+        data = df.values
+        # (시간, 노드) -> (노드, 시간) 형태로 전치
+        if data.shape[1] == 121: data = data[:, 1:]
+        if data.shape[0] > data.shape[1]: data = data.T
+        return data
+    except Exception as e:
+        print(f"[Error] {filename} 로드 중 오류: {e}")
+        return None
+
+# ==========================================
+# 3. 분석 함수 정의 (FFT & PSD)
+# ==========================================
+def analyze_signal(data_matrix, method='PSD'):
+    """
+    method: 'PSD' or 'FFT'
+    return: frequency_array, magnitude_db_array
+    """
+    # 유효 센서 인덱스 선택
+    max_idx = data_matrix.shape[0] - 1
+    indices = [i for i in SENSOR_INDICES if i <= max_idx]
+    signals = data_matrix[indices, :]
+    
+    if method == 'FFT':
+        # FFT 수행 (Magnitude)
+        n = signals.shape[1]
+        freqs = np.fft.rfftfreq(n, d=DT)
+        fft_vals = np.fft.rfft(signals, axis=1)
+        # 8개 센서 평균 (Amplitude)
+        mag = np.mean(np.abs(fft_vals), axis=0)
+        # Log Scale 변환 (20log10 for Amplitude)
+        mag_db = 20 * np.log10(mag + 1e-20)
+        return freqs, mag_db
+        
+    elif method == 'PSD':
+        # Welch PSD 수행 (Power)
+        # nperseg를 높여 주파수 해상도를 확보 (약 0.06Hz 단위)
+        freqs, pxx = welch(signals, fs=FS, nperseg=16384, axis=1)
+        # 8개 센서 평균 (Power)
+        avg_pxx = np.mean(pxx, axis=0)
+        # Log Scale 변환 (10log10 for Power)
+        mag_db = 10 * np.log10(avg_pxx + 1e-20)
+        return freqs, mag_db
+
+# ==========================================
+# 4. 타겟 피크 검출 함수
+# ==========================================
+def find_mode_peaks(freqs, mag_db, target_modes):
+    detected_freqs = []
+    
+    # 전체적인 피크 찾기 (Log 스케일 상에서 돌출된(prominence) 피크 검색)
+    # height 옵션 대신 prominence를 사용하여 "주변보다 솟은" 피크를 찾음
+    peaks, _ = find_peaks(mag_db, prominence=0.5, distance=10)
+    
+    found_peaks_f = freqs[peaks]
+    found_peaks_m = mag_db[peaks]
+    
+    for target in target_modes:
+        # 타겟 주파수 ±3Hz 범위 내에서 가장 높은 피크 검색
+        search_range = 3.0
+        mask = (found_peaks_f >= target - search_range) & (found_peaks_f <= target + search_range)
+        
+        candidates_f = found_peaks_f[mask]
+        candidates_m = found_peaks_m[mask]
+        
+        if len(candidates_f) > 0:
+            # 가장 에너지가 높은 것 선택
+            best_idx = np.argmax(candidates_m)
+            detected_freqs.append(candidates_f[best_idx])
+        else:
+            # 못 찾으면 NaN 처리 (그래프에서 끊겨 보이게)
+            detected_freqs.append(np.nan)
+            
+    return np.array(detected_freqs)
+
+# ==========================================
+# 5. 메인 실행 로직
+# ==========================================
+# 5-1. 건강 데이터 분석
+healthy_data = load_real_data("fh_accelerations.dat")
+if healthy_data is None: exit()
+
+# FFT & PSD 각각 기준값(Healthy) 계산
+f_fft_h, db_fft_h = analyze_signal(healthy_data, 'FFT')
+modes_fft_h = find_mode_peaks(f_fft_h, db_fft_h, TARGET_MODES)
+
+f_psd_h, db_psd_h = analyze_signal(healthy_data, 'PSD')
+modes_psd_h = find_mode_peaks(f_psd_h, db_psd_h, TARGET_MODES)
+
+print(f"[Healthy] FFT Modes: {modes_fft_h}")
+print(f"[Healthy] PSD Modes: {modes_psd_h}")
+
+# 5-2. 손상 데이터 분석 Loop
+fft_ratios = []
+psd_ratios = []
+damages = []
+
+for i in range(1, 11):
+    fname = f"f{i}_accelerations.dat"
+    d_percent = i * 10
+    d_data = load_real_data(fname)
+    
+    if d_data is not None:
+        damages.append(d_percent)
+        
+        # FFT 분석
+        f_fft, db_fft = analyze_signal(d_data, 'FFT')
+        modes_fft = find_mode_peaks(f_fft, db_fft, TARGET_MODES)
+        # 변화율 계산: (f_H - f_D) / f_H
+        r_fft = (modes_fft_h - modes_fft) / modes_fft_h
+        fft_ratios.append(r_fft)
+        
+        # PSD 분석
+        f_psd, db_psd = analyze_signal(d_data, 'PSD')
+        modes_psd = find_mode_peaks(f_psd, db_psd, TARGET_MODES)
+        r_psd = (modes_psd_h - modes_psd) / modes_psd_h
+        psd_ratios.append(r_psd)
+        
+        print(f" -> Processed {fname} (Damage {d_percent}%)")
+
+fft_ratios = np.array(fft_ratios) # Shape: (10, 4)
+psd_ratios = np.array(psd_ratios)
+
+# ==========================================
+# 6. 결과 시각화
+# ==========================================
+fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+
+# [Plot 1] FFT Spectrum (Log Scale) - Healthy vs Last Damage
+axs[0, 0].plot(f_fft_h, db_fft_h, 'k-', linewidth=1, label='Healthy')
+if len(damages) > 0: # 마지막 손상 데이터(100%) 같이 그리기
+    axs[0, 0].plot(f_fft, db_fft, 'r--', linewidth=1, alpha=0.7, label=f'Damage {damages[-1]}%')
+axs[0, 0].set_title("FFT Spectrum (Log Scale)")
+axs[0, 0].set_xlim(0, 80) # 80Hz까지만 확대
+axs[0, 0].set_ylabel("Magnitude (dB)")
+axs[0, 0].legend()
+axs[0, 0].grid(True, which='both', alpha=0.3)
+
+# [Plot 2] PSD Spectrum (Log Scale)
+axs[0, 1].plot(f_psd_h, db_psd_h, 'k-', linewidth=1, label='Healthy')
+if len(damages) > 0:
+    axs[0, 1].plot(f_psd, db_psd, 'r--', linewidth=1, alpha=0.7, label=f'Damage {damages[-1]}%')
+axs[0, 1].set_title("PSD Spectrum (Log Scale)")
+axs[0, 1].set_xlim(0, 80)
+axs[0, 1].set_ylabel("Power Spectral Density (dB)")
+axs[0, 1].legend()
+axs[0, 1].grid(True, which='both', alpha=0.3)
+
+# [Plot 3] FFT Change Ratio Graph
+colors = ['blue', 'green', 'orange', 'red']
+for m_idx, mode_freq in enumerate(TARGET_MODES):
+    axs[1, 0].plot(damages, fft_ratios[:, m_idx], marker='o', label=f'Mode {m_idx+1} (~{mode_freq}Hz)', color=colors[m_idx])
+axs[1, 0].set_title("Frequency Change Ratio (FFT Method)")
+axs[1, 0].set_xlabel("Damage Level (%)")
+axs[1, 0].set_ylabel("Change Ratio ((fH-fD)/fH)")
+axs[1, 0].legend()
+axs[1, 0].grid(True)
+
+# [Plot 4] PSD Change Ratio Graph
+for m_idx, mode_freq in enumerate(TARGET_MODES):
+    axs[1, 1].plot(damages, psd_ratios[:, m_idx], marker='s', linestyle='--', label=f'Mode {m_idx+1} (~{mode_freq}Hz)', color=colors[m_idx])
+axs[1, 1].set_title("Frequency Change Ratio (PSD Method)")
+axs[1, 1].set_xlabel("Damage Level (%)")
+axs[1, 1].set_ylabel("Change Ratio ((fH-fD)/fH)")
+axs[1, 1].legend()
+axs[1, 1].grid(True)
+
+plt.tight_layout()
+plt.show()
