@@ -1,0 +1,135 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from scipy.signal import welch, detrend
+
+# ==========================================
+# 1. 설정 (Configuration)
+# ==========================================
+class Config:
+    # [경로 설정]
+    DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\3rd"
+    
+    # [분석 파라미터]
+    FS = 1000.0             # Sampling Frequency
+    DT = 0.001              # Time Increment
+    TARGET_NODES = [3, 21, 39, 57, 63, 81, 99, 117] # 8개 센서
+    
+    # [시각화 범위]
+    MAX_FREQ_VIEW = 500     # 0 ~ 500Hz (Nyquist)
+    
+    # [PSD 설정]
+    N_PER_SEG = 4096        # 해상도 조절용
+
+# ==========================================
+# 2. 데이터 로드 및 처리 함수
+# ==========================================
+def load_sensors(filename):
+    filepath = os.path.join(Config.DATA_PATH, filename)
+    try:
+        full_data = np.loadtxt(filepath)
+        if full_data.shape[0] < full_data.shape[1]: full_data = full_data.T
+        extracted = full_data[:, Config.TARGET_NODES]
+        return extracted.T # (8, Time)
+    except:
+        print(f"[Error] 파일 로드 실패: {filename}")
+        return None
+
+def get_spectrum(signals, method='fft'):
+    """
+    signals: (8, Time)
+    method: 'fft' or 'psd'
+    """
+    # 전처리 (Detrend)
+    sig_detrend = detrend(signals, axis=1, type='linear')
+    
+    if method == 'fft':
+        n = sig_detrend.shape[1]
+        window = np.hanning(n)
+        sig_win = sig_detrend * window
+        
+        freqs = np.fft.rfftfreq(n, d=Config.DT)
+        fft_vals = np.fft.rfft(sig_win, axis=1)
+        
+        # Magnitude & Averaging
+        mag = np.abs(fft_vals) * 2.0 / np.sum(window)
+        avg_mag = np.mean(mag, axis=0)
+        return freqs, avg_mag
+        
+    elif method == 'psd':
+        freqs, pxx = welch(sig_detrend, fs=Config.FS, window='hann', 
+                           nperseg=Config.N_PER_SEG, axis=1)
+        avg_pxx = np.mean(pxx, axis=0)
+        return freqs, avg_pxx
+
+# ==========================================
+# 3. 시각화 전용 함수 (분리됨)
+# ==========================================
+def plot_analysis_results(fft_f, fft_mag, psd_f, psd_mag, title_prefix, color_code):
+    """
+    하나의 데이터셋에 대해 2x2 그리드(FFT/PSD, Linear/Log)를 그리는 함수
+    """
+    fig, axs = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle(f"[{title_prefix}] Broad-band Spectrum Analysis (0~{Config.MAX_FREQ_VIEW}Hz)", fontsize=16, fontweight='bold')
+    
+    # 공통 스타일 설정 헬퍼
+    def setup_ax(ax, title, ylabel, is_log=False):
+        ax.set_title(title, fontsize=12, fontweight='bold')
+        ax.set_xlabel("Frequency (Hz)")
+        ax.set_ylabel(ylabel)
+        ax.set_xlim(0, Config.MAX_FREQ_VIEW)
+        ax.grid(True, which="both", alpha=0.3)
+        if is_log: ax.set_yscale('log')
+
+    # [1] FFT - Linear
+    setup_ax(axs[0,0], "FFT Spectrum (Linear)", "Magnitude")
+    axs[0,0].plot(fft_f, fft_mag, color=color_code, lw=1)
+
+    # [2] FFT - Log
+    setup_ax(axs[0,1], "FFT Spectrum (Log Scale)", "Magnitude (Log)", is_log=True)
+    axs[0,1].plot(fft_f, fft_mag, color=color_code, lw=1)
+
+    # [3] PSD - Linear
+    setup_ax(axs[1,0], "PSD Spectrum (Linear)", "Power/Hz")
+    axs[1,0].plot(psd_f, psd_mag, color=color_code, lw=1)
+
+    # [4] PSD - Log
+    setup_ax(axs[1,1], "PSD Spectrum (Log Scale)", "Power/Hz (Log)", is_log=True)
+    axs[1,1].plot(psd_f, psd_mag, color=color_code, lw=1)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Main Title 공간 확보
+    plt.show()
+
+# ==========================================
+# 4. 메인 실행
+# ==========================================
+def main():
+    print(f"=== Separated Spectrum Analysis (0~{Config.MAX_FREQ_VIEW}Hz) ===")
+    
+    # --- [1] Healthy Data 분석 ---
+    print(">> Processing Healthy Data...")
+    h_data = load_sensors("fh_accelerations.dat")
+    
+    if h_data is not None:
+        h_fft_f, h_fft_mag = get_spectrum(h_data, 'fft')
+        h_psd_f, h_psd_mag = get_spectrum(h_data, 'psd')
+        
+        # Healthy 플롯 생성 (검정색)
+        plot_analysis_results(h_fft_f, h_fft_mag, h_psd_f, h_psd_mag, 
+                              "HEALTHY Data", "black")
+    
+    # --- [2] Damaged Data 분석 ---
+    # (예시: 가장 심한 100% 손상 데이터 f10 사용)
+    print(">> Processing Damaged Data...")
+    d_data = load_sensors("f10_accelerations.dat")
+    
+    if d_data is not None:
+        d_fft_f, d_fft_mag = get_spectrum(d_data, 'fft')
+        d_psd_f, d_psd_mag = get_spectrum(d_data, 'psd')
+        
+        # Damaged 플롯 생성 (빨간색)
+        plot_analysis_results(d_fft_f, d_fft_mag, d_psd_f, d_psd_mag, 
+                              "DAMAGED Data (Case f10)", "red")
+
+if __name__ == "__main__":
+    main()
