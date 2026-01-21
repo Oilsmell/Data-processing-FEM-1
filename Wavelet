@@ -1,0 +1,132 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 21 16:08:50 2026
+
+@author: Oilsmell
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+import pywt # PyWavelets 라이브러리 필요
+
+# ==========================================
+# 1. 설정 (Configuration)
+# ==========================================
+class Config:
+    DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\3rd"
+    FS = 1000.0             
+    TARGET_NODES = [3, 21, 39, 57, 63, 81, 99, 117]
+    TEST_CASES = list(range(1, 11))
+    
+    # [Wavelet 설정]
+    WAVELET_NAME = 'db4'    # Daubechies 4 (구조물 해석에 흔히 사용)
+    DECOMP_LEVEL = 5        # 5단계 분해 -> 대역폭 약 15.6Hz
+    # Level 5에서 20Hz가 포함된 노드 찾기:
+    # 0~15.625, 15.625~31.25 ... -> 두 번째 노드(Index 1)가 타겟
+    TARGET_BAND_IDX = 1     
+
+# ==========================================
+# 2. 데이터 로드 및 처리
+# ==========================================
+def load_sensors(filename):
+    filepath = os.path.join(Config.DATA_PATH, filename)
+    try:
+        full_data = np.loadtxt(filepath)
+        if full_data.shape[0] < full_data.shape[1]: full_data = full_data.T
+        extracted = full_data[:, Config.TARGET_NODES]
+        return extracted.T # (8, Time)
+    except: return None
+
+def calculate_wavelet_energy(signal):
+    """
+    1. 신호를 Wavelet Packet으로 분해
+    2. 타겟 노드(대역) 선택
+    3. 해당 대역의 에너지(Coefficient 제곱의 합) 계산
+    """
+    wp = pywt.WaveletPacket(data=signal, wavelet=Config.WAVELET_NAME, mode='symmetric', maxlevel=Config.DECOMP_LEVEL)
+    
+    # Level 5의 노드들 가져오기
+    # 순서: 주파수 순서로 정렬 (freq allocation)
+    nodes = [node.path for node in wp.get_level(Config.DECOMP_LEVEL, 'freq')]
+    
+    # 타겟 대역의 노드 경로 선택
+    target_node_path = nodes[Config.TARGET_BAND_IDX]
+    coeffs = wp[target_node_path].data
+    
+    # 에너지 계산 (Energy = sum(coeffs^2))
+    energy = np.sum(coeffs**2)
+    return energy
+
+# ==========================================
+# 3. 메인 분석 로직
+# ==========================================
+def main():
+    print("=== Feature 4: Wavelet Packet Energy (WPE) Analysis ===")
+    print(f"Wavelet: {Config.WAVELET_NAME}, Level: {Config.DECOMP_LEVEL}")
+    
+    # 대역폭 계산 표시
+    bandwidth = (Config.FS / 2) / (2**Config.DECOMP_LEVEL)
+    target_range = (Config.TARGET_BAND_IDX * bandwidth, (Config.TARGET_BAND_IDX + 1) * bandwidth)
+    print(f"Target Band: {target_range[0]:.2f} ~ {target_range[1]:.2f} Hz (Index {Config.TARGET_BAND_IDX})")
+    
+    # [Step 1] Healthy Baseline 계산
+    h_data = load_sensors("fh_accelerations.dat")
+    if h_data is None: return
+    
+    h_energies = []
+    for s in range(8):
+        eng = calculate_wavelet_energy(h_data[s])
+        h_energies.append(eng)
+    
+    # 건강 상태의 8개 센서 평균 에너지
+    E_healthy_avg = np.mean(h_energies)
+    print(f"\n[Healthy] Avg Energy: {E_healthy_avg:.4e}")
+
+    # [Step 2] Damage Cases 분석
+    damage_levels = []
+    features = []
+    
+    print("\n[Processing Damage Cases]")
+    print(f"{'Case':<15} | {'Avg Energy':<15} | {'Feature (|Eh-Ed|)':<20}")
+    print("-" * 55)
+    
+    for i in Config.TEST_CASES:
+        fname = f"f{i}_accelerations.dat"
+        d_percent = i * 10
+        d_data = load_sensors(fname)
+        
+        if d_data is None: continue
+        
+        damage_levels.append(d_percent)
+        
+        # 1. 각 센서별 에너지 계산
+        d_energies = []
+        for s in range(8):
+            eng = calculate_wavelet_energy(d_data[s])
+            d_energies.append(eng)
+        
+        # 2. 공간 평균 (Spatial Average)
+        E_damaged_avg = np.mean(d_energies)
+        
+        # 3. Feature 계산 (Difference)
+        # 슈퍼바이저 스타일: 절대값 차이 (|a - b|)
+        feat = abs(E_healthy_avg - E_damaged_avg)
+        features.append(feat)
+        
+        print(f"Damage {d_percent:<3}%    | {E_damaged_avg:.4e}     | {feat:.4e}")
+
+    # [Step 3] 시각화
+    plt.figure(figsize=(10, 6))
+    plt.plot(damage_levels, features, 'mo-', linewidth=2, markersize=8, label='Wavelet Energy Feature')
+    plt.title(f"Feature 4: Wavelet Energy Change\n(Band: {target_range[0]:.1f}~{target_range[1]:.1f} Hz)", fontsize=14)
+    plt.xlabel("Damage Level (%)", fontsize=12)
+    plt.ylabel("Avg Energy Difference (|Eh - Ed|)", fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.ticklabel_format(axis='y', style='sci', scilimits=(0,0))
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    main()
