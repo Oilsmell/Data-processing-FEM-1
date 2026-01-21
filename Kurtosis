@@ -1,0 +1,127 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 21 15:27:14 2026
+
+@author: Oilsmell
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+from scipy.stats import kurtosis  # 핵심 라이브러리 추가
+
+# --- 1. 환경 설정 ---
+DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\2nd"
+SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117]
+
+DURATION = 192.0        
+FS = 1000.0             
+WINDOW_SEC = 2.0        # 2초 윈도우
+
+TEST_CASES = list(range(1, 11)) 
+DAMAGE_LABELS = [f"{i*10}%" for i in TEST_CASES] 
+
+# --- 2. 데이터 로드 함수 (이전과 동일) ---
+def load_specific_nodes(filepath, target_indices):
+    try:
+        full_data = np.loadtxt(filepath)
+        extracted = full_data[:, target_indices]
+        return extracted.T
+    except Exception as e:
+        print(f"[Error] {filepath}: {e}")
+        return None
+
+# --- 3. 핵심 알고리즘: Kurtosis & 95th Percentile ---
+def get_95th_percentile_kurtosis(signal, fs, window_sec):
+    """
+    1. 신호를 window_sec 단위로 자름
+    2. 각 윈도우의 Kurtosis(첨도) 계산
+    3. 95% Percentile 반환
+    """
+    points_per_window = int(fs * window_sec)
+    n_windows = len(signal) // points_per_window
+    
+    if n_windows == 0: return 0.0
+    
+    # 데이터 자르기 & Reshape
+    truncated_len = n_windows * points_per_window
+    signal = signal[:truncated_len]
+    windows = signal.reshape((n_windows, points_per_window))
+    
+    # [핵심 변경] RMS 대신 Kurtosis 계산
+    # fisher=False: 정규분포=3 (Pearson 방식)
+    # fisher=True: 정규분포=0 (Fisher 방식, 기본값) -> 변화량 비교니 뭘 써도 상관없음
+    kurt_values = kurtosis(windows, axis=1, fisher=False) 
+    
+    # 95th Percentile 추출
+    p95_value = np.percentile(kurt_values, 95)
+    
+    return p95_value
+
+# --- 4. 메인 프로세스 ---
+print(f"=== Feature 3: Kurtosis Analysis (Window: {WINDOW_SEC}s) ===\n")
+
+# [Step 1] 건강 데이터(Healthy) 처리
+healthy_file = os.path.join(DATA_PATH, "fh_accelerations.dat")
+h_data = load_specific_nodes(healthy_file, SELECTED_NODE_INDICES)
+
+if h_data is None: exit()
+
+# a1 ~ a8 구하기 (건강 상태의 95% Kurtosis)
+a_values = []
+for s in range(len(SELECTED_NODE_INDICES)):
+    a = get_95th_percentile_kurtosis(h_data[s], FS, WINDOW_SEC)
+    a_values.append(a)
+
+print(f"[Healthy Baseline]")
+print(f" -> Kurtosis (95th%): {[f'{v:.2f}' for v in a_values]}\n")
+
+# [Step 2] 손상 데이터 처리
+final_features = [] 
+
+print(f"{'File':<25} | {'Avg Feature (|a-b|)':<20}")
+print("-" * 50)
+
+for i, case_num in enumerate(TEST_CASES):
+    filename = f"f{case_num}_accelerations.dat"
+    filepath = os.path.join(DATA_PATH, filename)
+    
+    d_data = load_specific_nodes(filepath, SELECTED_NODE_INDICES)
+    
+    if d_data is None:
+        final_features.append(0)
+        continue
+        
+    sensor_diffs = []
+    
+    # 8개 센서 반복
+    for s in range(len(SELECTED_NODE_INDICES)):
+        # b 값 (손상 상태 Kurtosis)
+        b = get_95th_percentile_kurtosis(d_data[s], FS, WINDOW_SEC)
+        
+        # Feature: |a - b|
+        diff = abs(a_values[s] - b)
+        sensor_diffs.append(diff)
+    
+    # 8개 센서 평균
+    avg_feature = np.mean(sensor_diffs)
+    final_features.append(avg_feature)
+    
+    print(f"{filename:<25} | {avg_feature:.6f}")
+
+# --- 5. 시각화 ---
+if len(final_features) > 0:
+    plt.figure(figsize=(12, 6))
+    plt.plot(DAMAGE_LABELS, final_features, 'gs-', linewidth=2, markersize=8, label='Kurtosis Feature')
+    
+    plt.title(f'Feature 3: Kurtosis Change (95th Percentile Difference)', fontsize=14)
+    plt.xlabel('Damage Level', fontsize=12)
+    plt.ylabel('Average Kurtosis Difference (|a-b|)', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend()
+    
+    for i, v in enumerate(final_features):
+        plt.text(i, v, f"{v:.4f}", ha='center', va='bottom', fontweight='bold')
+        
+    plt.tight_layout()
+    plt.show()
