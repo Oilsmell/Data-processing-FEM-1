@@ -1,0 +1,151 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+# --- 1. 환경 및 변수 설정 ---
+DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\3rd"
+SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117] # 8개 센서
+
+# [설정] 1000Hz, 192초 (192,001개 데이터)
+DURATION = 192.0        
+DT = 0.001              
+FS = 1000.0             # 1000 Hz
+WINDOW_SEC = 2.0        # RMS Window 2초
+
+# 손상 케이스 (10% ~ 100%)
+# f1_accelerations.dat ~ f10_accelerations.dat
+TEST_CASES = list(range(1, 11)) 
+DAMAGE_LABELS = [f"{i*10}%" for i in TEST_CASES] 
+
+# --- 2. 데이터 로드 함수 (수정됨) ---
+def load_specific_nodes(filepath, target_indices):
+    """
+    [192001, 120] 행렬 (Time, Node)을 읽어서
+    지정된 8개 노드 열만 추출한 뒤, 분석하기 좋게 (8, 192001)로 변환
+    """
+    try:
+        # 1. 전체 데이터 로드 -> Shape: (192001, 120)
+        full_data = np.loadtxt(filepath)
+        
+        # 2. 특정 열(노드) 추출 -> Shape: (192001, 8)
+        # 문법: [행 전체(:), 열 인덱스(target_indices)]
+        extracted_cols = full_data[:, target_indices]
+        
+        # 3. (Time, Sensors) -> (Sensors, Time)으로 전치
+        # 이유: 메인 루프에서 'for sensor in data:' 로 반복하기 위함
+        return extracted_cols.T
+        
+    except Exception as e:
+        print(f"[Error] 파일 로드 실패: {filepath}\n원인: {e}")
+        return None
+
+# --- 3. 핵심 알고리즘: RMS & 95th Percentile ---
+def get_95th_percentile_rms(signal, fs, window_sec):
+    """
+    1. 신호를 window_sec 단위로 자름
+    2. 각 윈도우의 RMS 계산
+    3. RMS 값들의 95% Percentile 반환
+    """
+    # 윈도우 당 데이터 포인트 수 (2초 * 1000Hz = 2000개)
+    points_per_window = int(fs * window_sec)
+    
+    # 전체 윈도우 개수 계산
+    n_windows = len(signal) // points_per_window
+    
+    if n_windows == 0:
+        return 0.0 # 데이터가 너무 짧은 경우 예외처리
+    
+    # 데이터 자르기 (나머지 부분 버림)
+    truncated_len = n_windows * points_per_window
+    signal = signal[:truncated_len]
+    
+    # Reshape: (윈도우 수, 윈도우 당 포인트)
+    windows = signal.reshape((n_windows, points_per_window))
+    
+    # RMS 계산 (axis=1: 각 윈도우 내부의 평균제곱근)
+    rms_values = np.sqrt(np.mean(windows**2, axis=1))
+    
+    # 95th Percentile 추출 (상위 5% 대표값)
+    p95_value = np.percentile(rms_values, 95)
+    
+    return p95_value
+
+# --- 4. 메인 프로세스 ---
+
+print(f"=== RMS Feature Analysis (Explicit Matrix: 192001x120) ===\n")
+
+# [Step 1] 건강 데이터(Healthy) 처리
+healthy_file = os.path.join(DATA_PATH, "fh_accelerations.dat")
+h_data = load_specific_nodes(healthy_file, SELECTED_NODE_INDICES)
+
+if h_data is None:
+    print("건강 데이터 로드 실패. 종료합니다.")
+    exit()
+
+# a1 ~ a8 구하기 (건강 상태의 95% RMS)
+a_values = []
+for s in range(len(SELECTED_NODE_INDICES)):
+    a = get_95th_percentile_rms(h_data[s], FS, WINDOW_SEC)
+    a_values.append(a)
+
+print(f"[Healthy Baseline Calculated]")
+print(f" -> a1~a8 values (Sample): {a_values[0]:.5f}, {a_values[1]:.5f} ...\n")
+
+
+# [Step 2] 손상 데이터(Damaged) 루프 및 비교
+final_features = [] # 그래프용 (각 케이스의 평균 Feature)
+
+print(f"{'File':<25} | {'Avg Feature (|a-b|)':<20}")
+print("-" * 50)
+
+for i, case_num in enumerate(TEST_CASES):
+    filename = f"f{case_num}_accelerations.dat"
+    filepath = os.path.join(DATA_PATH, filename)
+    
+    d_data = load_specific_nodes(filepath, SELECTED_NODE_INDICES)
+    
+    if d_data is None:
+        final_features.append(0)
+        print(f"{filename:<25} | Load Failed")
+        continue
+        
+    # 현재 케이스의 센서별 차이 저장용
+    sensor_diffs = []
+    
+    # 8개 센서 반복
+    for s in range(len(SELECTED_NODE_INDICES)):
+        # b 값 구하기 (손상 상태의 95% RMS)
+        b = get_95th_percentile_rms(d_data[s], FS, WINDOW_SEC)
+        
+        # a 값 가져오기
+        a = a_values[s]
+        
+        # 절대값 차이 (Feature)
+        diff = abs(a - b)
+        sensor_diffs.append(diff)
+    
+    # 8개 센서 평균 구하기 (공간 평균)
+    avg_feature = np.mean(sensor_diffs)
+    final_features.append(avg_feature)
+    
+    print(f"{filename:<25} | {avg_feature:.6f}")
+
+# --- 5. 시각화 (Step 10) ---
+if len(final_features) > 0:
+    plt.figure(figsize=(12, 6))
+
+    plt.plot(DAMAGE_LABELS, final_features, 'bs-', linewidth=2, markersize=8, label='RMS Feature')
+
+    plt.title(f'Feature 2: RMS Change (95th Percentile Difference)', fontsize=14)
+    plt.xlabel('Damage Level', fontsize=12)
+    plt.ylabel('Average RMS Difference (|a-b|)', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend()
+
+    # 값 텍스트 표시
+    for i, v in enumerate(final_features):
+        plt.text(i, v, f"{v:.5f}", ha='center', va='bottom', fontweight='bold')
+
+    plt.tight_layout()
+    plt.show()
+    print("\n=== 분석 완료 ===")
