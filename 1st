@@ -1,0 +1,157 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+# --- 1. 환경 설정 (Configuration) ---
+# [수정됨] 실제 데이터 경로
+DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations"
+
+# 슈퍼바이저 지정 8개 노드
+SELECTED_NODE_INDICES = [3, 21, 39, 57, 63, 81, 99, 117]
+
+# [핵심 수정] 
+# Time Increment = 0.001s -> Sampling Frequency = 1000 Hz
+# Duration = 192s (데이터 포인트 수 = 192 * 1000 = 192,000개 예상)
+FS = 1000.0       
+NUM_SENSORS = 8
+TEST_CASES = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] # Damage Cases 1~10
+
+# --- 2. 핵심 함수 정의 ---
+
+def load_and_extract_sensors(filepath, selected_indices):
+    """
+    데이터 파일을 읽어 8개 센서 데이터만 추출하여 반환
+    Return Shape: (8, Time)
+    """
+    try:
+        # print(f"Loading: {os.path.basename(filepath)} ...") 
+        full_data = np.loadtxt(filepath)
+        
+        # (Nodes, Time) vs (Time, Nodes) 확인 및 전치
+        if full_data.shape[0] < full_data.shape[1]: 
+             full_data = full_data.T 
+
+        # 8개 노드 추출 (Slicing)
+        extracted_data = full_data[:, selected_indices] 
+        
+        # (Sensors, Time) 형태로 변환하여 반환
+        return extracted_data.T 
+        
+    except Exception as e:
+        print(f"[Error] 파일 로드 실패 ({os.path.basename(filepath)}): {e}")
+        return None
+
+def get_peak_frequency_interpolated(signal, fs):
+    """
+    Parabolic Interpolation을 적용하여 정밀 주파수 추정
+    FS가 1000Hz로 높아져서 기본 해상도도 좋아졌지만,
+    미세한 손상 감지를 위해 보간법을 유지하는 것이 유리함.
+    """
+    # 1. DC 제거
+    signal = signal - np.mean(signal)
+    n = len(signal)
+    
+    # 2. FFT 수행 (Zero Padding 2배)
+    n_padded = n * 2
+    fft_spectrum = np.fft.rfft(signal, n=n_padded)
+    freqs = np.fft.rfftfreq(n_padded, d=1/fs)
+    magnitudes = np.abs(fft_spectrum)
+    magnitudes[0] = 0 # 0Hz 성분 제거
+    
+    # 3. 가장 높은 막대(Coarse Peak) 찾기
+    i = np.argmax(magnitudes)
+    
+    # 예외처리
+    if i == 0 or i == len(magnitudes) - 1:
+        return freqs[i]
+    
+    # 4. Parabolic Interpolation
+    y1 = magnitudes[i - 1]
+    y2 = magnitudes[i]
+    y3 = magnitudes[i + 1]
+    
+    delta = (y3 - y1) / (2 * (2 * y2 - y1 - y3))
+    
+    # 보정된 주파수 계산
+    df = fs / n_padded
+    true_peak_freq = (i + delta) * df
+    
+    return true_peak_freq
+
+# --- 3. 메인 프로세스 (Main Execution) ---
+
+print(f"=== 분석 시작: FS={FS}Hz, Interpolated FFT ===")
+
+# [Step A] Healthy Data (fh.dat)
+healthy_path = os.path.join(DATA_PATH, "fh_accelerations.dat")
+healthy_signals = load_and_extract_sensors(healthy_path, SELECTED_NODE_INDICES)
+
+if healthy_signals is not None:
+    # 8개 센서 각각의 주파수 추출
+    h_freqs = [get_peak_frequency_interpolated(healthy_signals[s], FS) for s in range(NUM_SENSORS)]
+    f_H_avg = np.mean(h_freqs)
+    
+    print(f"\n[Healthy] {os.path.basename(healthy_path)}")
+    print(f" -> 8 Sensors Avg Freq: {f_H_avg:.5f} Hz")
+else:
+    print("[Critical Error] Healthy 데이터 로드 실패. 경로를 확인하세요.")
+    exit()
+
+# [Step B] Damaged Data (f1 ~ f10) 처리
+damage_results = []   
+feature_values = []   
+case_names = []       
+
+print("\n--- 손상 데이터 개별 분석 결과 ---")
+
+for case_num in TEST_CASES:
+    filename = f"f{case_num}_accelerations.dat"
+    filepath = os.path.join(DATA_PATH, filename)
+    
+    # 1. 파일 로드
+    dmg_signals = load_and_extract_sensors(filepath, SELECTED_NODE_INDICES)
+    
+    if dmg_signals is not None:
+        # 2. 주파수 추출
+        d_freqs = [get_peak_frequency_interpolated(dmg_signals[s], FS) for s in range(NUM_SENSORS)]
+        
+        # 3. 평균 계산
+        f_D_avg = np.mean(d_freqs)
+        
+        # 4. Feature 계산: (fH - fD) / fH
+        feature = (f_H_avg - f_D_avg) / f_H_avg
+        
+        # 5. 저장
+        damage_results.append(f_D_avg)
+        feature_values.append(feature)
+        case_names.append(f"f{case_num}")
+        
+        # 6. 결과 출력 (Scientific Notation 적용 추천)
+        print(f"[{filename}] Damage Case {case_num}")
+        print(f"  -> Avg Freq (fD): {f_D_avg:.5f} Hz")
+        print(f"  -> Diff (fH-fD) : {f_H_avg - f_D_avg:.5e} Hz") # 지수 표기법
+        print(f"  -> Feature Val  : {feature:.5e}")            # 지수 표기법
+        print("-" * 30)
+    else:
+        print(f"[{filename}] 로드 실패 (Skip)")
+
+# --- 4. 시각화 (Visualization) ---
+if len(feature_values) > 0:
+    plt.figure(figsize=(12, 6))
+    
+    plt.plot(case_names, feature_values, 'ro-', linewidth=2, markersize=8, label='Feature 1')
+    
+    plt.title(f'Feature 1: Frequency Shift (FS={int(FS)}Hz)', fontsize=14)
+    plt.xlabel('Damage Case Files', fontsize=12)
+    plt.ylabel('Normalized Frequency Change\n$(f_H - f_D) / f_H$', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    
+    # Y축을 지수 형태(Scientific Notation)로 강제 변환
+    plt.ticklabel_format(axis='y', style='sci', scilimits=(0,0))
+    
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+    print("\n[완료] 그래프가 출력되었습니다.")
+else:
+    print("\n[알림] 분석된 손상 데이터가 없습니다.")
