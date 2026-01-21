@@ -25,8 +25,9 @@ class FEMDataProcessor:
         """
         self.sampling_rate = sampling_rate
         self.time_data = None
-        self.frequency_data = None
+        self.fft_frequencies = None
         self.fft_result = None
+        self.psd_frequencies = None
         self.psd_result = None
         
     def load_data(self, data, time=None):
@@ -77,7 +78,7 @@ class FEMDataProcessor:
         magnitudes = np.abs(fft_values)
         
         # Store results
-        self.frequency_data = frequencies
+        self.fft_frequencies = frequencies
         self.fft_result = magnitudes
         
         return frequencies, magnitudes
@@ -116,7 +117,7 @@ class FEMDataProcessor:
             raise ValueError("Method must be 'welch' or 'periodogram'")
         
         # Store results
-        self.frequency_data = frequencies
+        self.psd_frequencies = frequencies
         self.psd_result = psd
         
         return frequencies, psd
@@ -161,7 +162,7 @@ class FEMDataProcessor:
             raise ValueError("FFT not computed. Use compute_fft() first.")
         
         plt.figure(figsize=(10, 4))
-        plt.plot(self.frequency_data, self.fft_result)
+        plt.plot(self.fft_frequencies, self.fft_result)
         plt.xlabel('Frequency (Hz)')
         plt.ylabel('Magnitude')
         plt.title(title)
@@ -189,9 +190,9 @@ class FEMDataProcessor:
         
         plt.figure(figsize=(10, 4))
         if scale == 'log':
-            plt.semilogy(self.frequency_data, self.psd_result)
+            plt.semilogy(self.psd_frequencies, self.psd_result)
         else:
-            plt.plot(self.frequency_data, self.psd_result)
+            plt.plot(self.psd_frequencies, self.psd_result)
         plt.xlabel('Frequency (Hz)')
         plt.ylabel('PSD')
         plt.title(title)
@@ -222,21 +223,19 @@ class FEMDataProcessor:
         if use_psd and self.psd_result is not None:
             # Use stored PSD data
             data = self.psd_result
-            freqs = self.frequency_data
+            freqs = self.psd_frequencies
         elif not use_psd and self.fft_result is not None:
-            # Need to recompute to get correct frequency array for FFT
-            if self.time_data is None:
-                raise ValueError("No data loaded.")
-            freqs, data = self.compute_fft()
+            # Use stored FFT data
+            data = self.fft_result
+            freqs = self.fft_frequencies
         elif self.psd_result is not None:
             # Fallback to PSD if available
             data = self.psd_result
-            freqs = self.frequency_data
+            freqs = self.psd_frequencies
         elif self.fft_result is not None:
             # Fallback to FFT if available
-            if self.time_data is None:
-                raise ValueError("No data loaded.")
-            freqs, data = self.compute_fft()
+            data = self.fft_result
+            freqs = self.fft_frequencies
         else:
             raise ValueError("No frequency analysis results available.")
         
