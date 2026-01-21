@@ -1,0 +1,246 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import os
+from scipy.signal import welch, detrend, find_peaks
+
+# ==========================================
+# 1. CONFIGURATION (구역 설정 변경)
+# ==========================================
+class Config:
+    DATA_PATH = r"E:\Benchmark Code\benchmarktu1402-master\f_accerlerations\3rd"
+    
+    FS = 1000.0             
+    DT = 0.001              
+    TARGET_NODES = [3, 21, 39, 57, 63, 81, 99, 117]
+    
+    # [수정됨] 55Hz와 60Hz를 분리하여 각각 1개씩 찾도록 변경
+    SEARCH_ZONES = [
+        # Zone 1: 20Hz & 22Hz (비슷한 크기 -> 2개 검색)
+        {"name": "Low Freq (20, 22Hz)",  "range": (15, 30), "n_peaks": 2},
+        
+        # Zone 2: 55Hz (주변부 2.5Hz 여유)
+        {"name": "Mode 3 (55Hz)",        "range": (52.5, 57.5), "n_peaks": 1},
+        
+        # Zone 3: 60Hz (55Hz보다 작으므로 별도 구역 지정)
+        {"name": "Mode 4 (60Hz)",        "range": (57.5, 65.0), "n_peaks": 1}
+    ]
+    
+    # 중복 방지용 최소 거리 (약 0.5Hz)
+    MIN_PEAK_DIST_IDX = 100 
+    
+    N_PER_SEG = 16384       
+    TEST_CASES = list(range(1, 11))
+
+# ==========================================
+# 2. DATA LOADER
+# ==========================================
+class DataLoader:
+    @staticmethod
+    def load_sensors(filename, config):
+        filepath = os.path.join(config.DATA_PATH, filename)
+        try:
+            full_data = np.loadtxt(filepath)
+            if full_data.shape[0] < full_data.shape[1]: full_data = full_data.T
+            extracted = full_data[:, config.TARGET_NODES]
+            return extracted.T
+        except: return None
+
+# ==========================================
+# 3. SIGNAL PROCESSOR
+# ==========================================
+class SignalProcessor:
+    @staticmethod
+    def compute_fft(signals, config):
+        n_samples = signals.shape[1]
+        sig_detrend = detrend(signals, axis=1, type='linear')
+        window = np.hanning(n_samples)
+        sig_windowed = sig_detrend * window
+        freqs = np.fft.rfftfreq(n_samples, d=config.DT)
+        fft_vals = np.fft.rfft(sig_windowed, axis=1)
+        mag = np.abs(fft_vals) * 2.0 / np.sum(window)
+        return freqs, np.mean(mag, axis=0)
+
+    @staticmethod
+    def compute_psd(signals, config):
+        # PSD 주파수 축 길이는 N_PER_SEG에 의존함 (약 8193개)
+        freqs, pxx = welch(signals, fs=config.FS, window='hann', 
+                           nperseg=config.N_PER_SEG, axis=1, detrend='linear')
+        return freqs, np.mean(pxx, axis=0)
+
+    @staticmethod
+    def get_top_peaks_in_zone(freqs, mags, f_min, f_max, n_peaks, min_dist_idx):
+        # 1. Zone Masking
+        mask = (freqs >= f_min) & (freqs <= f_max)
+        if not mask.any(): return [np.nan] * n_peaks
+        
+        local_f = freqs[mask]
+        local_m = mags[mask]
+        
+        # 2. Peak Finding
+        peaks, _ = find_peaks(local_m, distance=min_dist_idx)
+        
+        if len(peaks) == 0: return [np.nan] * n_peaks
+        
+        # 3. 상위 N개 선정 (Magnitude 기준 내림차순)
+        peak_heights = local_m[peaks]
+        sorted_indices = np.argsort(peak_heights)[::-1] 
+        top_k_indices = sorted_indices[:n_peaks]
+        
+        selected_local_peaks = peaks[top_k_indices]
+        
+        # 4. 주파수 순 정렬 (모드 순서 보장)
+        selected_local_peaks.sort()
+        
+        # 5. Interpolation
+        refined_freqs = []
+        for loc_idx in selected_local_peaks:
+            global_indices = np.where(mask)[0]
+            global_idx = global_indices[loc_idx]
+            
+            if global_idx == 0 or global_idx == len(mags) - 1:
+                refined_freqs.append(freqs[global_idx])
+                continue
+                
+            y1, y2, y3 = mags[global_idx-1], mags[global_idx], mags[global_idx+1]
+            denom = 2 * (2 * y2 - y1 - y3)
+            
+            if denom == 0: 
+                refined_freqs.append(freqs[global_idx])
+            else:
+                delta = (y3 - y1) / denom
+                df = freqs[1] - freqs[0]
+                refined_freqs.append(freqs[global_idx] + (delta * df))
+        
+        while len(refined_freqs) < n_peaks:
+            refined_freqs.append(np.nan)
+            
+        return refined_freqs
+
+# ==========================================
+# 4. MAIN ANALYSIS LOGIC
+# ==========================================
+def main():
+    cfg = Config()
+    print("=== Fixed Zone Analysis & Visualization ===")
+    
+    # [Step 1] Healthy Data
+    h_data = DataLoader.load_sensors("fh_accelerations.dat", cfg)
+    if h_data is None: return
+
+    f_fft, mag_fft_h = SignalProcessor.compute_fft(h_data, cfg)
+    f_psd, mag_psd_h = SignalProcessor.compute_psd(h_data, cfg)
+    
+    h_peaks_fft = []
+    h_peaks_psd = []
+    
+    print("\n[Healthy Reference Modes]")
+    for zone in cfg.SEARCH_ZONES:
+        # FFT
+        peaks_f = SignalProcessor.get_top_peaks_in_zone(
+            f_fft, mag_fft_h, zone['range'][0], zone['range'][1], zone['n_peaks'], cfg.MIN_PEAK_DIST_IDX
+        )
+        h_peaks_fft.extend(peaks_f)
+        
+        # PSD
+        peaks_p = SignalProcessor.get_top_peaks_in_zone(
+            f_psd, mag_psd_h, zone['range'][0], zone['range'][1], zone['n_peaks'], cfg.MIN_PEAK_DIST_IDX
+        )
+        h_peaks_psd.extend(peaks_p)
+        
+        print(f" Zone {zone['name']}: FFT {peaks_f} | PSD {peaks_p}")
+
+    mode_names = ["Mode 1 (20Hz)", "Mode 2 (22Hz)", "Mode 3 (55Hz)", "Mode 4 (60Hz)"]
+    
+    # [Step 2] Damaged Data
+    damage_levels = []
+    results_fft = {name: [] for name in mode_names}
+    results_psd = {name: [] for name in mode_names}
+    
+    all_fft_specs = []
+    all_psd_specs = []
+
+    print("\n[Processing Damage Cases]")
+    for i in cfg.TEST_CASES:
+        fname = f"f{i}_accelerations.dat"
+        d_percent = i * 10
+        d_data = DataLoader.load_sensors(fname, cfg)
+        if d_data is None: continue
+        
+        damage_levels.append(d_percent)
+        
+        _, mag_fft_d = SignalProcessor.compute_fft(d_data, cfg)
+        _, mag_psd_d = SignalProcessor.compute_psd(d_data, cfg)
+        
+        all_fft_specs.append(mag_fft_d)
+        all_psd_specs.append(mag_psd_d)
+        
+        current_peaks_fft = []
+        current_peaks_psd = []
+        
+        for zone in cfg.SEARCH_ZONES:
+            p_f = SignalProcessor.get_top_peaks_in_zone(f_fft, mag_fft_d, *zone['range'], zone['n_peaks'], cfg.MIN_PEAK_DIST_IDX)
+            p_p = SignalProcessor.get_top_peaks_in_zone(f_psd, mag_psd_d, *zone['range'], zone['n_peaks'], cfg.MIN_PEAK_DIST_IDX)
+            current_peaks_fft.extend(p_f)
+            current_peaks_psd.extend(p_p)
+            
+        print(f"\n>>> Damage {d_percent}%")
+        for idx, m_name in enumerate(mode_names):
+            if idx >= len(current_peaks_fft): break
+            
+            # FFT Feature
+            d_val_f = current_peaks_fft[idx]
+            h_val_f = h_peaks_fft[idx]
+            feat_f = (h_val_f - d_val_f) / h_val_f if not np.isnan(d_val_f) else 0
+            results_fft[m_name].append(feat_f)
+            
+            # PSD Feature
+            d_val_p = current_peaks_psd[idx]
+            h_val_p = h_peaks_psd[idx]
+            feat_p = (h_val_p - d_val_p) / h_val_p if not np.isnan(d_val_p) else 0
+            results_psd[m_name].append(feat_p)
+            
+            print(f"  {m_name:<15} | FFT: {d_val_f:.4f} Hz | PSD: {d_val_p:.4f} Hz")
+
+    # ==========================================
+    # 5. VISUALIZATION (버그 수정됨)
+    # ==========================================
+    if not damage_levels: return
+
+    fig, axs = plt.subplots(2, 2, figsize=(16, 12))
+    colors = cm.jet(np.linspace(0.3, 1, len(damage_levels)))
+    
+    # [수정됨] x축 데이터(f_fft, f_psd)를 플롯마다 다르게 지정
+    # Plot 1: FFT
+    axs[0,0].semilogy(f_fft, mag_fft_h, 'k-', lw=1.5, alpha=0.8, label='Healthy')
+    for idx, spec in enumerate(all_fft_specs):
+        axs[0,0].semilogy(f_fft, spec, color=colors[idx], lw=0.8, alpha=0.7)
+    axs[0,0].set_title("FFT Spectrum")
+    axs[0,0].set_xlim(0, 80)
+    axs[0,0].grid(True, alpha=0.3)
+
+    # Plot 2: PSD (f_psd 사용!)
+    axs[0,1].semilogy(f_psd, mag_psd_h, 'k-', lw=1.5, alpha=0.8, label='Healthy')
+    for idx, spec in enumerate(all_psd_specs):
+        # [Bug Fix] 여기서 f_fft 대신 f_psd를 사용해야 함
+        axs[0,1].semilogy(f_psd, spec, color=colors[idx], lw=0.8, alpha=0.7)
+    axs[0,1].set_title("PSD Spectrum (Welch)")
+    axs[0,1].set_xlim(0, 80)
+    axs[0,1].grid(True, alpha=0.3)
+
+    # Plot 3 & 4: Trends
+    for ax, res_dict, method in zip([axs[1,0], axs[1,1]], [results_fft, results_psd], ["FFT", "PSD"]):
+        for m_name in mode_names:
+            ax.plot(damage_levels, res_dict[m_name], 'o-', label=m_name)
+        ax.set_title(f"Feature Trend ({method})")
+        ax.set_xlabel("Damage (%)")
+        ax.set_ylabel("(fH-fD)/fH")
+        ax.ticklabel_format(axis='y', style='sci', scilimits=(0,0))
+        ax.legend()
+        ax.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    main()
